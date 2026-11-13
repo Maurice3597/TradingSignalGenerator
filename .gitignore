@@ -7,3 +7,4 @@ state.json
 *.log
 .pytest_cache/
 state.json*
+.signal-cache/

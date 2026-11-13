@@ -10,6 +10,7 @@ repaint.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -109,19 +110,41 @@ class CachedFetcher:
     inside the Twelve Data free plan limit of 800/day and 8/minute.
     """
 
-    def __init__(self, provider, bars: int = 500):
+    def __init__(self, provider, bars: int = 500, cache_dir: str | None = None):
         self.provider = provider
         self.bars = bars
+        self.cache_dir = cache_dir
         self._cache: dict[str, pd.DataFrame] = {}
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+
+    def _path(self, timeframe: str) -> str:
+        return os.path.join(self.cache_dir, f"ohlc_{timeframe}.csv")
+
+    def _load_disk(self, timeframe: str) -> pd.DataFrame | None:
+        if not self.cache_dir or not os.path.exists(self._path(timeframe)):
+            return None
+        try:
+            df = pd.read_csv(self._path(timeframe), index_col="datetime")
+            df.index = pd.to_datetime(df.index, utc=True)
+            return df.astype(float)
+        except (OSError, ValueError, KeyError) as e:
+            log.warning("Ignoring unreadable cache for %s: %s", timeframe, e)
+            return None
 
     def get(self, timeframe: str, now: datetime | None = None) -> pd.DataFrame:
         now = now or datetime.now(timezone.utc)
         cached = self._cache.get(timeframe)
+        if cached is None:
+            cached = self._load_disk(timeframe)
         if cached is not None and not cached.empty:
             next_close = cached.index[-1] + timedelta(minutes=2 * TIMEFRAME_MINUTES[timeframe])
             if pd.Timestamp(now) < next_close:
+                self._cache[timeframe] = cached
                 return cached
         df = self.provider.fetch(timeframe, self.bars)
         self._cache[timeframe] = df
+        if self.cache_dir:
+            df.rename_axis("datetime").to_csv(self._path(timeframe))
         log.debug("Fetched %s: %d bars, last=%s", timeframe, len(df), df.index[-1] if len(df) else None)
         return df

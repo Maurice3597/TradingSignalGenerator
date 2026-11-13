@@ -1,0 +1,70 @@
+name: Gold signals
+
+on:
+  schedule:
+    # Every 5 minutes at :02, :07, :12 ... (2 min after each 5m candle closes; avoids :00 load peak).
+    # GitHub may delay or skip scheduled runs under load. Times are UTC.
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Send the WhatsApp message even if nothing changed"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gold-signals
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      # Non-secret settings: Settings -> Secrets and variables -> Actions -> Variables
+      DATA_PROVIDER: ${{ vars.DATA_PROVIDER || 'twelvedata' }}
+      WHATSAPP_PROVIDER: ${{ vars.WHATSAPP_PROVIDER || 'callmebot' }}
+      NOTIFY_MODE: ${{ vars.NOTIFY_MODE || 'change' }}
+      MIN_VOTES: ${{ vars.MIN_VOTES }}
+      ADX_MIN: ${{ vars.ADX_MIN }}
+      # Secrets: Settings -> Secrets and variables -> Actions -> Secrets
+      WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_WHATSAPP_FROM: ${{ vars.TWILIO_WHATSAPP_FROM || '+14155238886' }}
+      META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+      META_PHONE_NUMBER_ID: ${{ secrets.META_PHONE_NUMBER_ID }}
+      # Remembered between runs via the Actions cache
+      STATE_FILE: .signal-cache/state.json
+      DATA_CACHE_DIR: .signal-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore previous state and candles
+        uses: actions/cache/restore@v4
+        with:
+          path: .signal-cache
+          key: signal-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: signal-cache-
+
+      - name: Analyse and send WhatsApp alert
+        run: python -m gold_signals --once ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
+
+      - name: Save state and candles
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .signal-cache
+          key: signal-cache-${{ github.run_id }}-${{ github.run_attempt }}

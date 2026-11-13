@@ -189,7 +189,31 @@ def test_run_cycle_sends_once_then_dedups(tmp_path):
     prov.fetch.side_effect = lambda tf, bars: trend_df(+1, minutes={"5m": 5, "15m": 15, "30m": 30, "1h": 60}[tf])
     notifier = MagicMock()
     fetcher = CachedFetcher(prov)
-    text = run_cycle(fetcher, notifier, cfg, "XAU/USD")
-    assert notifier.send.call_count == 1 and "CONFLUENCE BUY" in text
+    text, ok = run_cycle(fetcher, notifier, cfg, "XAU/USD")
+    assert ok and notifier.send.call_count == 1 and "CONFLUENCE BUY" in text
     run_cycle(fetcher, notifier, cfg, "XAU/USD")
     assert notifier.send.call_count == 1  # unchanged -> no duplicate alert
+
+
+def test_disk_cache_survives_new_process(tmp_path):
+    idx = pd.date_range("2025-01-06 10:00", periods=2, freq="15min", tz="UTC")
+    prov = MagicMock()
+    prov.fetch.return_value = pd.DataFrame(
+        {"open": [1.0, 2], "high": [2.0, 3], "low": [0.5, 1], "close": [1.5, 2.5]}, index=idx)
+    CachedFetcher(prov, cache_dir=str(tmp_path)).get("15m", now=datetime(2025, 1, 6, 10, 31, tzinfo=timezone.utc))
+    # A brand-new fetcher (next GitHub Actions run) reuses the file instead of calling the API
+    df = CachedFetcher(prov, cache_dir=str(tmp_path)).get("15m", now=datetime(2025, 1, 6, 10, 40, tzinfo=timezone.utc))
+    assert prov.fetch.call_count == 1
+    pd.testing.assert_frame_equal(df, prov.fetch.return_value, check_freq=False, check_names=False)
+
+
+def test_once_cli_dedups_between_runs(tmp_path, monkeypatch):
+    from gold_signals import main as m
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "console")
+    monkeypatch.setenv("STATE_FILE", str(tmp_path / "state.json"))
+    sent = []
+    monkeypatch.setattr(m.ConsoleNotifier, "send", lambda self, t: sent.append(t))
+    args = ["--demo", "--once", "--env-file", str(tmp_path / "none.env")]
+    assert m.main(args) == 0 and len(sent) == 1
+    assert m.main(args) == 0 and len(sent) == 1   # nothing changed -> no second alert
+    assert m.main(args + ["--force"]) == 0 and len(sent) == 2

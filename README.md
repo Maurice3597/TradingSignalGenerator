@@ -88,7 +88,8 @@ python -m gold_signals --test-whatsapp
 ```bash
 python -m gold_signals --demo --once --dry-run   # synthetic data, prints the message (no keys)
 python -m gold_signals --once --dry-run          # real data, prints instead of sending
-python -m gold_signals --once                    # real data, sends one WhatsApp alert
+python -m gold_signals --once                    # real data, one check; alerts only if something changed
+python -m gold_signals --once --force            # real data, always sends the WhatsApp alert
 python -m gold_signals                           # runs forever, every 5-minute candle close
 ```
 
@@ -97,6 +98,40 @@ The loop runs about 10 s after each 5-minute close (UTC). It skips the weekly go
 when a signal or confluence changes. The last alert is stored in `state.json`.
 
 To keep it running 24/5, use a VPS with `nohup`, `tmux`, a systemd service, or similar.
+
+## Running on GitHub Actions (no server needed)
+
+`.github/workflows/gold-signals.yml` runs `python -m gold_signals --once` on GitHub's servers
+every 5 minutes (at :02, :07, :12 … UTC, two minutes after each 5m candle closes). The last
+alert and the downloaded candles are kept between runs with the Actions cache, so you get
+**no duplicate messages** and Twelve Data is only called when a candle has closed.
+
+**Setup (one time):**
+
+1. On GitHub open the repo → **Settings → Secrets and variables → Actions**.
+2. Under **Secrets**, click *New repository secret* and add:
+   | Name | Value |
+   |------|-------|
+   | `WHATSAPP_TO` | your number in international format, e.g. `+234…` |
+   | `TWELVEDATA_API_KEY` | your Twelve Data key |
+   | `CALLMEBOT_API_KEY` | your CallMeBot key (or the `TWILIO_*` / `META_*` secrets) |
+3. Optional, under **Variables**: `WHATSAPP_PROVIDER` (`callmebot` default, `twilio`, `meta`),
+   `DATA_PROVIDER` (`twelvedata` default, or `yahoo`), `NOTIFY_MODE`, `MIN_VOTES`, `ADX_MIN`.
+4. Go to the **Actions** tab, enable workflows if asked, open **Gold signals** and click
+   **Run workflow**. The first manual run always sends a message, so you can confirm that
+   WhatsApp delivery works. The run log shows the signal for each timeframe.
+
+**Limitations (from GitHub's documentation):**
+* Scheduled runs [can be delayed during periods of high load](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule),
+  and some may be skipped. Alerts can arrive several minutes late, which matters for 5m
+  entries. A VPS is more reliable.
+* In a public repository, [scheduled workflows are disabled after 60 days without repository
+  activity](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/disabling-and-enabling-a-workflow).
+  Push a commit, or re-enable the workflow from the Actions tab.
+* Standard GitHub-hosted runners are [free for public repositories](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+  A private repository would use about 8,600 minutes a month at this schedule, which is more
+  than the free allowance.
+* The schedule only runs from the repository's **default branch**.
 
 ### Example alert
 

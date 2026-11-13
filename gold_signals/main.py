@@ -2,7 +2,8 @@
 
 Usage:
     python -m gold_signals                # run forever, evaluating after every 5-minute close
-    python -m gold_signals --once         # single evaluation, then exit
+    python -m gold_signals --once         # single evaluation (alerts only on change), then exit
+    python -m gold_signals --once --force # single evaluation, always send
     python -m gold_signals --once --dry-run   # print message instead of sending
     python -m gold_signals --demo --once --dry-run   # synthetic data, no API keys needed
     python -m gold_signals --test-whatsapp    # send a test message to your WhatsApp
@@ -20,9 +21,9 @@ import numpy as np
 import pandas as pd
 
 from .config import TIMEFRAME_MINUTES, TIMEFRAMES, AppConfig
-from .data import CachedFetcher, make_provider
+from .data import CachedFetcher, DataError, make_provider
 from .formatter import format_message
-from .notifier import ConsoleNotifier, make_notifier, send_with_retry
+from .notifier import ConsoleNotifier, NotifyError, make_notifier, send_with_retry
 from .strategy import analyze, find_confluences
 
 log = logging.getLogger("gold_signals")
@@ -99,7 +100,9 @@ def evaluate(fetcher: CachedFetcher, cfg: AppConfig, symbol: str):
     return signals, confluences, format_message(symbol, signals, confluences)
 
 
-def run_cycle(fetcher, notifier, cfg: AppConfig, symbol: str, force_send: bool = False) -> str:
+def run_cycle(fetcher, notifier, cfg: AppConfig, symbol: str, force_send: bool = False) -> tuple[str, bool]:
+    """Evaluate all timeframes and alert if needed. Returns (message, ok); ok is False when
+    some timeframe could not be analysed or an alert could not be delivered."""
     signals, confluences, text = evaluate(fetcher, cfg, symbol)
     for tf, s in signals.items():
         log.info("%-3s %-7s score=%+d %s", tf, s.direction, s.score, s.reason)
@@ -108,7 +111,8 @@ def run_cycle(fetcher, notifier, cfg: AppConfig, symbol: str, force_send: bool =
 
     if not signals:
         log.warning("No data for any timeframe; nothing sent")
-        return text
+        return text, False
+    ok = len(signals) == len(TIMEFRAMES)
     state = load_state(cfg.state_file)
     cur = fingerprint(signals, confluences)
     if force_send or should_notify(cfg.notify_mode, state.get("last"), cur):
@@ -117,9 +121,10 @@ def run_cycle(fetcher, notifier, cfg: AppConfig, symbol: str, force_send: bool =
             save_state(cfg.state_file, {"last": cur, "sent_at": datetime.now(timezone.utc).isoformat()})
         else:
             log.error("Alert could not be delivered; will retry next cycle")
+            ok = False
     else:
         log.info("No change in signals; no alert sent")
-    return text
+    return text, ok
 
 
 def seconds_to_next_close(now: datetime, delay_s: int) -> float:
@@ -130,6 +135,8 @@ def seconds_to_next_close(now: datetime, delay_s: int) -> float:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Gold multi-timeframe signal generator")
     ap.add_argument("--once", action="store_true", help="run a single evaluation and exit")
+    ap.add_argument("--force", action="store_true",
+                    help="with --once: send even if nothing changed or the market is closed")
     ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending to WhatsApp")
     ap.add_argument("--demo", action="store_true", help="use synthetic data (no API key needed)")
     ap.add_argument("--test-whatsapp", action="store_true", help="send a test WhatsApp message and exit")
@@ -141,23 +148,31 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = AppConfig.load(args.env_file)
 
-    notifier = ConsoleNotifier() if args.dry_run else make_notifier(cfg)
+    try:
+        notifier = ConsoleNotifier() if args.dry_run else make_notifier(cfg)
+        provider = DemoProvider() if args.demo else make_provider(cfg)
+    except (NotifyError, DataError) as e:
+        log.error("Configuration error: %s", e)
+        return 2
     if args.test_whatsapp:
         ok = send_with_retry(notifier, "✅ Gold signal generator: WhatsApp test message.")
         print("Sent" if ok else "FAILED")
         return 0 if ok else 1
 
     if args.demo:
-        provider, symbol = DemoProvider(), "DEMO"
+        symbol = "DEMO"
         cfg.state_file = cfg.state_file + ".demo"
     else:
-        provider = make_provider(cfg)
         symbol = cfg.twelvedata_symbol if cfg.data_provider == "twelvedata" else cfg.yahoo_symbol
-    fetcher = CachedFetcher(provider, cfg.bars)
+    fetcher = CachedFetcher(provider, cfg.bars, cfg.data_cache_dir or None)
 
     if args.once:
-        run_cycle(fetcher, notifier, cfg, symbol, force_send=True)
-        return 0
+        if (cfg.skip_weekend and not args.demo and not args.force
+                and market_closed(datetime.now(timezone.utc))):
+            log.info("Gold market closed (weekend); nothing to do")
+            return 0
+        _, ok = run_cycle(fetcher, notifier, cfg, symbol, force_send=args.force or args.dry_run)
+        return 0 if ok else 1
 
     log.info("Started: provider=%s whatsapp=%s mode=%s", cfg.data_provider, cfg.whatsapp_provider, cfg.notify_mode)
     while True:

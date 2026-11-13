@@ -90,6 +90,7 @@ class AppConfig:
 
     notify_mode: str = "change"  # change | confluence | always
     state_file: str = "state.json"
+    data_cache_dir: str = ""  # persist downloaded candles between runs (GitHub Actions)
     candle_close_delay_s: int = 10
     skip_weekend: bool = True
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
@@ -115,6 +116,7 @@ class AppConfig:
             meta_api_version=_env("META_API_VERSION", cls.meta_api_version),
             notify_mode=_env("NOTIFY_MODE", cls.notify_mode).lower(),
             state_file=_env("STATE_FILE", cls.state_file),
+            data_cache_dir=_env("DATA_CACHE_DIR"),
             candle_close_delay_s=_env_int("CANDLE_CLOSE_DELAY_S", cls.candle_close_delay_s),
             skip_weekend=_env_bool("SKIP_WEEKEND", cls.skip_weekend),
             strategy=StrategyConfig.from_env(),
